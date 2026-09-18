@@ -1,0 +1,43 @@
+You control one Piper arm. The first image shows the arm, red cube, and green
+target pad; the second image is from the gripper. Complete this task:
+{task}
+
+Current sensor phase: {piper_phase}.
+Gripper: {gripper_state}; finger gap: {finger_width_m} m.
+TCP x, y, z: {tcp_position_m} m.
+Red cube x, y, z: {cube_position_m} m.
+Green target x, y, z: {target_position_m} m.
+Robot home TCP x, y, z: {home_position_m} m.
+Recent moves, newest first: {recent_moves}.
+
+Each MOVE shifts the TCP about 0.020 m. FWD increases x, BACK decreases x,
+LEFT increases y, RIGHT decreases y, UP increases z, and DOWN decreases z.
+
+Apply the current sensor phase before interpreting the images:
+- APPROACH_CUBE: align TCP x/y with the red cube. Correct x first, then y.
+  If cube x is larger choose MV_FWD; if smaller choose MV_BACK.
+  If cube y is larger choose MV_LEFT; if smaller choose MV_RIGHT.
+- DESCEND_TO_CUBE: output MV_DOWN.
+- AT_GRASP_HEIGHT: output GRASP. Do not move down again.
+- EMPTY_GRASP: output RELEASE so another attempt can begin.
+- LIFT_WITH_CUBE: output MV_UP. Keep holding the cube.
+- CARRY_TO_TARGET: align TCP x/y with the green target. Correct x first,
+  then y. If target x is larger choose MV_FWD; if smaller choose MV_BACK.
+  If target y is larger choose MV_LEFT; if smaller choose MV_RIGHT.
+  Keep the cube high and do not release it during horizontal motion.
+- LOWER_AT_TARGET: output MV_DOWN while holding the cube.
+- RELEASE_AT_TARGET: output RELEASE, then leave the cube undisturbed and begin
+  the open-gripper retreat on the following turn.
+- RETREAT_UP: the cube has been released on the target. Output MV_UP with the
+  gripper open until the arm is safely above the cube.
+- RETURN_HOME_FWD: output MV_FWD with the gripper open.
+- RETURN_HOME_BACK: output MV_BACK with the gripper open.
+- RETURN_HOME_LEFT: output MV_LEFT with the gripper open.
+- RETURN_HOME_RIGHT: output MV_RIGHT with the gripper open.
+- RETURN_HOME_UP: output MV_UP with the gripper open.
+- RETURN_HOME_DOWN: output MV_DOWN with the gripper open.
+- COMPLETE: the cube is placed, the gripper is open, and the arm is home.
+
+The phase for THIS turn is {piper_phase}; output its action above.
+Output exactly one token from this list, with no other text:
+MV_FWD, MV_BACK, MV_LEFT, MV_RIGHT, MV_UP, MV_DOWN, GRASP, RELEASE

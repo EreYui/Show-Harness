@@ -196,6 +196,7 @@ def check_vlm(r: Report, cfg: dict, backend: str | None, live: bool) -> None:
             base_url=vlm["base_url"], model=vlm["model"], api_key=key or "EMPTY",
             timeout_s=20, max_tokens=8, temperature=0.0,
             provider=provider, api_dialect=vlm.get("api_dialect"), max_retries=0,
+            thinking_mode=vlm.get("thinking_mode"),
         )
         if provider == "vllm":
             client.health_check(wait_s=0)

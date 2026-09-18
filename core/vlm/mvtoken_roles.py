@@ -118,14 +118,41 @@ class MvTokenController:
         agentview_image,
         wrist_image=None,
         debug: bool = False,
+        tcp_position_m=None,
+        finger_width_m=None,
+        piper_phase=None,
+        cube_position_m=None,
+        target_position_m=None,
+        home_position_m=None,
     ) -> VLMResponse:
         """One step -> one atomic token. See :meth:`_ordered_images` for the wire order."""
-        prompt = self.prompt_template.format(
-            task=task,
-            gripper_state=gripper_state,
-            recent_moves=recent_moves or "none",
+        fields = {
             **self.extra_fields,
-        )
+            "task": task,
+            "gripper_state": gripper_state,
+            "recent_moves": recent_moves or "none",
+            "tcp_position_m": (
+                ", ".join(f"{float(axis):.3f}" for axis in tcp_position_m)
+                if tcp_position_m is not None else "unknown"
+            ),
+            "finger_width_m": (
+                f"{float(finger_width_m):.3f}" if finger_width_m is not None else "unknown"
+            ),
+            "piper_phase": piper_phase or "unknown",
+            "cube_position_m": (
+                ", ".join(f"{float(axis):.3f}" for axis in cube_position_m)
+                if cube_position_m is not None else "unknown"
+            ),
+            "target_position_m": (
+                ", ".join(f"{float(axis):.3f}" for axis in target_position_m)
+                if target_position_m is not None else "unknown"
+            ),
+            "home_position_m": (
+                ", ".join(f"{float(axis):.3f}" for axis in home_position_m)
+                if home_position_m is not None else "unknown"
+            ),
+        }
+        prompt = self.prompt_template.format(**fields)
         self.last_prompt = prompt
 
         images = self._ordered_images(agentview_image, wrist_image)

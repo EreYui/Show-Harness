@@ -87,7 +87,8 @@ def load_secrets_env(
 
     Dependency-free dotenv parser (no python-dotenv): blank lines and ``#`` comments
     are skipped, an optional ``export`` prefix is allowed, surrounding single/double
-    quotes are stripped, and whitespace around ``=`` is tolerated (``KEY = "v"``).
+    quotes are stripped, inline comments after whitespace are ignored, and
+    whitespace around ``=`` is tolerated (``KEY = "v"  # note``).
     A missing file is not an error (returns ``{}``). Existing environment variables
     are preserved unless ``override=True``, so a value exported in the shell wins.
     With the default path, an optional gitignored per-machine overlay
@@ -129,6 +130,16 @@ def _parse_env_file(env_path: Path) -> Dict[str, str]:
         key, value = line.split("=", 1)
         key = key.strip()
         value = value.strip()
+        # Keep # within a value (including quoted values), but ignore a trailing
+        # comment separated from the value by whitespace.
+        quote = value[0] if value.startswith(("'", '"')) else None
+        for index, char in enumerate(value):
+            if quote is not None:
+                if index > 0 and char == quote and value[index - 1] != "\\":
+                    quote = None
+            elif char == "#" and (index == 0 or value[index - 1].isspace()):
+                value = value[:index].rstrip()
+                break
         if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
             value = value[1:-1]
         if not key:

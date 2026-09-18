@@ -1,0 +1,21 @@
+You control one Piper arm. The first image shows the arm and red cube; the
+second is from the gripper. Pick up the red cube and lift it 8 cm.
+
+Current sensor phase: {piper_phase}.
+Gripper: {gripper_state}; finger gap: {finger_width_m} m.
+TCP x, y, z: {tcp_position_m} m. Recent moves: {recent_moves}.
+Cube center: x=0.300, y=0.000 m. Each MOVE shifts the TCP about 0.020 m.
+FWD increases x, BACK decreases x, LEFT increases y, RIGHT decreases y.
+
+Apply the current sensor phase BEFORE interpreting the images:
+- CUBE_HELD: output MV_UP. The finger gap confirms contact. Continue MV_UP
+  every turn until the cube has lifted 8 cm. Never lower or reopen the fingers.
+- EMPTY_GRASP: output RELEASE, then try again.
+- AT_GRASP_HEIGHT: output GRASP. The fingers cannot move farther down.
+- APPROACH: use the two views to center the gripper over the cube. If TCP x
+  is outside 0.288 to 0.308 m or y outside -0.015 to 0.015 m, move toward
+  the cube horizontally. Otherwise output MV_DOWN.
+
+The phase for THIS turn is {piper_phase}; follow its action above.
+Output exactly one token from this list, no other text:
+MV_FWD, MV_BACK, MV_LEFT, MV_RIGHT, MV_UP, MV_DOWN, GRASP, RELEASE

@@ -1,0 +1,229 @@
+# Official RMC-AIDA-L / RM65-B-V full-body model in Isaac Lab 2.2 / Isaac Sim 5.
+# The chassis root and both wheel joints are locked for manipulation experiments;
+# the lift is held at one configured height. Navigation is intentionally disabled.
+# The runner finds the official Ecosystem_Cases RMC-AIDA-L branch under
+# ~/Ecosystem_Cases_RMC_AIDA_L, or accepts --rmc-aidal-root.
+overlays:
+  - {path: experiments/current_sims.yaml, optional: true}
+
+robot: realman_rmc_aida_l_rm65_b_v_static_base
+physical_platform:
+  name: RealMan RMC-AIDAL dual-arm lift mobile robot
+  model: RMC-AIDAL
+  arm_model: RM65-B-V
+  arm_count: 2
+  mobile_base: true
+  lift_axis_travel_m: 0.90
+  simulation_fidelity: official_full_body_static_base
+realman_task: parallel_forward
+task_description: >-
+  Work in parallel. The LEFT arm must place the red cube on the green pad; the
+  RIGHT arm must place the blue cube on the yellow pad. After releasing, raise
+  both open grippers and return both arms to their initial poses.
+device: cuda:0
+headless: true
+episodes: 1
+physics_dt: 0.008333333333333333
+max_physics_steps: 9000
+
+# The official base mesh reaches down to -0.2412 m, so this root pose puts its
+# wheels on z=0. The lift joint uses a negative coordinate to move upward.
+platform_position: [0.0, 0.0, 0.2412]
+lift_joint_position: -0.30
+home_joints:
+  # These are whole-platform IK solutions, not the old upright-arm poses. Each
+  # retains at least 0.86 rad of joint-limit margin along the vertical grasp path.
+  left: [1.157356, 1.100136, 0.681898, 0.711583, 1.700671, 0.461647]
+  right: [2.015107, 1.129603, 0.619584, -0.705346, 1.745319, 0.668668]
+
+# The official two-finger grippers extend along link_left/right_6 +Z. These home
+# poses point both tool +Z axes down over their cubes.
+tcp_offset_link6_m: [0.0, 0.0, 0.20]
+# The official four-bar gripper opens near 0 rad and closes toward -0.91 rad.
+# Both commands stay 0.01 rad inside the URDF limits after PhysX conversion.
+gripper_open_rad: -0.01
+gripper_closed_rad: -0.90
+gripper_max_width_m: 0.050
+cube_size_m: 0.04
+table_top_z: 0.68
+table_center_x: 0.73
+table_size: [0.58, 0.82, 0.05]
+cube_xy:
+  left: [0.62, 0.15]
+  right: [0.62, -0.15]
+target_xy:
+  left: [0.76, 0.15]
+  right: [0.76, -0.15]
+
+# Reproducible target-layout variants selected with --task. Cube start poses and
+# robot home poses stay fixed, so each run isolates the transport direction.
+realman_tasks:
+  parallel_forward:
+    task_description: >-
+      Work in parallel. The LEFT arm must place the red cube on the green pad;
+      the RIGHT arm must place the blue cube on the yellow pad. Both pads are
+      straight ahead. Release, raise both open grippers, and return both arms home.
+    target_xy:
+      left: [0.76, 0.15]
+      right: [0.76, -0.15]
+  diagonal_inward:
+    task_description: >-
+      Work in parallel. The LEFT arm must place the red cube on the inner green
+      pad; the RIGHT arm must place the blue cube on the inner yellow pad. Release,
+      raise both open grippers, and return both arms home.
+    target_xy:
+      left: [0.75, 0.07]
+      right: [0.75, -0.07]
+  diagonal_outward:
+    task_description: >-
+      Work in parallel. The LEFT arm must place the red cube on the outer green
+      pad; the RIGHT arm must place the blue cube on the outer yellow pad. Release,
+      raise both open grippers, and return both arms home.
+    target_xy:
+      left: [0.75, 0.23]
+      right: [0.75, -0.23]
+  split_depth:
+    task_description: >-
+      Work in parallel. The LEFT arm must move the red cube forward onto the green
+      pad; the RIGHT arm must move the blue cube backward onto the yellow pad.
+      Release, raise both open grippers, and return both arms home.
+    target_xy:
+      left: [0.76, 0.15]
+      right: [0.50, -0.15]
+target_size_m: 0.085
+min_tcp_z_m: 0.703
+transport_tcp_z_m: 0.80
+align_tolerance_m: 0.015
+target_success_tolerance_m: 0.035
+home_tolerance_m: 0.018
+
+camera_width: 640
+camera_height: 480
+agentview_pose:
+  # Front-on calibration required by controller_dual.txt: +x projects toward the
+  # image bottom and +/-y project horizontally, matching MV_FWD and MV_LEFT/RIGHT.
+  pos: [1.45, 0.0, 1.20]
+  rot: [0.0, -0.211000, 0.0, 0.977486]
+# A wider, higher camera used only in logs and the four-panel rollout video. It
+# is deliberately excluded from the three-image VLM request contract.
+overview_pose:
+  pos: [3.20, 0.0, 1.45]
+  rot: [0.0, -0.211000, 0.0, 0.977486]
+overview_focal_length: 18.0
+wrist_pose:
+  # Each camera is attached to the matching official left/right camera link.
+  # Identity ROS rotation looks along the tool +Z axis; 3 cm clears the housing.
+  pos: [0.0, 0.0, 0.03]
+  rot: [1.0, 0.0, 0.0, 0.0]
+agentview_rotation_degrees: 0
+wrist_rotation_degrees: 0
+agentview_flip: none
+wrist_flip: none
+# The front camera looks toward base -x. Mirror it so base +y appears on image-left,
+# matching controller_dual.txt's MV_LEFT -> +y convention.
+original_zero_shot_agentview_flip: horizontal
+original_zero_shot_wrist_flip: horizontal
+# Recenter the fixed outer camera mounts so each gripper/object pair appears near the
+# image center expected by controller_dual.txt. Values are [right, down] pixels.
+original_zero_shot_wrist_translations_px:
+  left: [90, 45]
+  right: [-90, -45]
+# Keep the grasp object/fingertips and exclude the distant pads. The generic prompt
+# will then use Wrist guidance for grasp alignment and calibrated Front guidance for
+# transport/placement, as its two-view contract intends.
+original_zero_shot_wrist_focus_crop_px: 160
+agentview_crop_aspect: null
+wrist_crop_aspect: 1.3333
+agentview_square_size: 256
+wrist_square_size: 256
+
+# One decision moves each TCP approximately 2 cm. Both arm commands are applied
+# together on every physics step.
+step_m: 0.020
+zero_shot_fine_step_m: 0.010
+zero_shot_coarse_step_m: 0.020
+high_above_table_m: 0.005
+motion_frame: base
+# In each downward wrist view, target motion toward image-top corresponds to +x.
+# EgoPlugin swaps only the wrist FWD/BACK lines; the calibrated front rules stay fixed.
+is_ego: true
+# This platform uses the Piper-style lateral action convention (+y = MV_LEFT).
+# The mirrored front camera projects +y onto image-left.
+coords_positive_y_token: MV_LEFT
+coords_positive_y_image_edge: left
+coords_include_goal_error: true
+coords_enforce_goal_error: true
+sim_steps_per_decision: 36
+settle_steps_per_decision: 4
+gripper_hold_steps: 55
+max_delta_m: 0.02
+move_vectors:
+  MV_FWD: [1.0, 0.0, 0.0]
+  MV_BACK: [-1.0, 0.0, 0.0]
+  MV_LEFT: [0.0, 1.0, 0.0]
+  MV_RIGHT: [0.0, -1.0, 0.0]
+  MV_UP: [0.0, 0.0, 1.0]
+  MV_DOWN: [0.0, 0.0, -1.0]
+
+plugins:
+  subgoal: true
+  proprioception: true
+  recovery: true
+  variable_step: true
+  mem_text: true
+  smooth: true
+  coords: true
+  mcq: false
+  action_chunk: false
+  rotation: false
+  view_select: true
+empty_width_m: 0.0199
+open_width_m: 0.045
+# The official right wrist camera/gripper mount has a fixed +x capture offset. After
+# a width-confirmed empty close, release and apply this one calibrated nudge once.
+empty_grasp_realign_tokens:
+  left: null
+  right: MV_FWD
+
+num_steps_wait: 80
+max_steps: 90
+loop_period_s: 0.0
+log_dir: rollouts/realman_dual_isaaclab
+v0:
+  video_fps: 5.0
+
+# The public default remains the released local simulation adapter. DeepSeek is
+# selected explicitly with --vlm-backend deepseek. The --scripted acceptance run
+# does not construct a VLM client and consumes no API quota.
+vlm_backend: qwen3_5_2b
+vlm:
+  base_url: http://localhost:8000/v1
+  timeout_s: 120
+  startup_wait_s: 600
+  startup_poll_s: 5
+  temperature: 0.0
+  api_key: EMPTY
+vlm_backends:
+  deepseek:
+    provider: deepseek
+    base_url: https://api.deepseek.com
+    model: deepseek-flash
+    api_key_env: DEEPSEEK_API_KEY
+    max_tokens: 64
+    thinking_mode: disabled
+  qwen3_5_2b:
+    provider: vllm
+    model: qwen3_5_2b_showharness_sim
+    max_tokens: 64
+    reasoning_cot: false
+    chat_template_kwargs:
+      enable_thinking: false
+  heyroute:
+    provider: openai
+    wire_api: responses
+    base_url: https://heyroute.ai/v1
+    model: gpt-5.6-sol
+    api_key_env: HEYROUTE_API_KEY
+    max_tokens: 64
+    reasoning_effort: low
+    max_retries: 2

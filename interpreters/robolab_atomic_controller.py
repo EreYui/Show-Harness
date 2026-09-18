@@ -58,6 +58,8 @@ class RobolabAtomicController:
         max_delta_m: float = 0.05,
         open_gripper_action: float = OPEN_GRIPPER_ACTION,
         close_gripper_action: float = CLOSE_GRIPPER_ACTION,
+        motion_frame: str = "base",
+        tool_axis: Sequence[float] = (0.0, 0.0, 1.0),
     ) -> None:
         missing = [name for name in MOVE_ATOMS if name not in move_vectors]
         if missing:
@@ -73,6 +75,15 @@ class RobolabAtomicController:
         self.max_delta_m = float(max_delta_m)
         self.open_gripper_action = float(open_gripper_action)
         self.close_gripper_action = float(close_gripper_action)
+        self.motion_frame = str(motion_frame or "base").strip().lower()
+        if self.motion_frame not in ("base", "wrist"):
+            raise ValueError(
+                f"motion_frame must be 'base' or 'wrist', got {motion_frame!r}"
+            )
+        self.tool_axis = np.asarray(tool_axis, dtype=float)
+        if self.tool_axis.shape != (3,) or np.linalg.norm(self.tool_axis) <= 0.0:
+            raise ValueError("tool_axis must be a non-zero XYZ vector")
+        self.tool_axis = self.tool_axis / np.linalg.norm(self.tool_axis)
         self.state = AtomicControllerState(
             gripper_command=self.open_gripper_action,
             gripper_name="OPEN",
@@ -136,7 +147,43 @@ class RobolabAtomicController:
         out[3:6] = hold_orientation_rotvec(self._quat_ref, quat_cur) / self.ik_scale
         return out
 
-    def action_for_atomic(self, token: str) -> np.ndarray:
+    @staticmethod
+    def _rotate_vector_wxyz(quat_wxyz, vector: np.ndarray) -> np.ndarray:
+        quat = np.asarray(quat_wxyz, dtype=float)
+        if quat.shape != (4,) or np.linalg.norm(quat) <= 0.0:
+            raise ValueError("ee_quat must be a non-zero WXYZ quaternion")
+        quat = quat / np.linalg.norm(quat)
+        w = float(quat[0])
+        xyz = quat[1:]
+        return vector + 2.0 * w * np.cross(xyz, vector) + 2.0 * np.cross(
+            xyz, np.cross(xyz, vector)
+        )
+
+    def _to_motion_frame(
+        self, delta_m: np.ndarray, ee_quat=None, motion_frame: str | None = None
+    ) -> np.ndarray:
+        """Rotate horizontal moves into the live gripper-heading frame when selected."""
+        frame = self.motion_frame if motion_frame is None else str(motion_frame).lower()
+        if frame not in ("base", "wrist"):
+            raise ValueError(f"motion_frame must be 'base' or 'wrist', got {frame!r}")
+        if frame != "wrist" or ee_quat is None:
+            return delta_m
+        heading_axis = self._rotate_vector_wxyz(ee_quat, self.tool_axis)
+        horizontal = float(np.hypot(heading_axis[0], heading_axis[1]))
+        if horizontal < 0.1:
+            return delta_m
+        c, s = heading_axis[0] / horizontal, heading_axis[1] / horizontal
+        x, y, z = (float(value) for value in delta_m)
+        return np.asarray([c * x - s * y, s * x + c * y, z], dtype=float)
+
+    def action_for_atomic(
+        self,
+        token: str,
+        *,
+        step_m: float | None = None,
+        ee_quat=None,
+        motion_frame: str | None = None,
+    ) -> np.ndarray:
         """One MV_* token -> the per-control-step share of a ``step_m`` base-frame nudge.
 
         The returned action is meant to be re-sent for ``sim_steps_per_decision`` steps;
@@ -145,7 +192,13 @@ class RobolabAtomicController:
         if token not in self.move_vectors:
             raise ValueError(f"Unknown move token {token!r}; expected one of {MOVE_ATOMS}")
         self.state.last_atomic = token
-        return self._action(self.move_vectors[token] * self.per_step_m)
+        distance = self.step_m if step_m is None else float(step_m)
+        delta = self.move_vectors[token] * (distance / self.sim_steps_per_decision)
+        return self._action(
+            self._to_motion_frame(
+                delta, ee_quat=ee_quat, motion_frame=motion_frame
+            )
+        )
 
     def hold_action(self) -> np.ndarray:
         """Zero displacement, current gripper command (used to settle / open / close)."""

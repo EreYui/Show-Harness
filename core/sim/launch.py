@@ -12,6 +12,33 @@ from core.config import deep_merge, make_api_key_refresher, resolve_vlm_config
 from core.vlm.vlm_client import VLMClient
 
 
+def enable_original_zero_shot_reasoning(cfg: dict[str, Any]) -> None:
+    """Enable the deliberative request shape used by the generic zero-shot stack.
+
+    The adapted MVTOKEN policies intentionally stay in their short, non-thinking mode.
+    The original planner/controller path is different: it asks a general vision model
+    to ground a stage and reason before committing to an atomic token.  Keep this
+    override local to ``--policy-stack original_zero_shot`` so A/B runs remain honest.
+    """
+    vlm = cfg["vlm"]
+    vlm["reasoning_cot"] = True
+    budget = max(
+        2048,
+        int(cfg.get("zero_shot_cot_max_tokens", 0) or 0),
+        int(vlm.get("cot_max_tokens") or 0),
+    )
+    vlm["cot_max_tokens"] = budget
+    vlm["max_tokens"] = max(budget, int(vlm.get("max_tokens") or 0))
+    vlm["reasoning_directive"] = (
+        "Reason in at most eight short lines from the measurements and all views. "
+        "Do not restate the prompt. Always finish with the exact FINAL action line."
+    )
+    if str(vlm.get("provider", "")).lower() == "deepseek":
+        # DeepSeek's vision API uses this explicit switch for interleaved thinking.
+        vlm["thinking_mode"] = "enabled"
+        vlm["reasoning_effort"] = "high"
+
+
 def build_config(args: argparse.Namespace, robot_cfg: dict[str, Any]) -> dict[str, Any]:
     overrides: dict[str, Any] = {}
     for arg_name, cfg_name in [
@@ -34,7 +61,7 @@ def build_config(args: argparse.Namespace, robot_cfg: dict[str, Any]) -> dict[st
     vlm = resolve_vlm_config(cfg, backend=args.vlm_backend)
     if args.vlm_url:
         # --vlm-url / VLM_URL / VLLM_BASE_URL target the LOCAL vLLM. A hosted backend
-        # (openai/gemini) carries its own base_url; overriding it would send its model id
+        # (openai/gemini/deepseek) carries its own base_url; overriding it would send its model id
         # to the wrong server, so scope the override to the vllm provider.
         if vlm.get("provider", "vllm") == "vllm":
             vlm["base_url"] = args.vlm_url
@@ -52,6 +79,11 @@ def build_config(args: argparse.Namespace, robot_cfg: dict[str, Any]) -> dict[st
 
 def make_vlm_client(args: argparse.Namespace, cfg: dict[str, Any]):
     vlm_cfg = cfg["vlm"]
+    if vlm_cfg.get("provider") == "deepseek" and vlm_cfg.get("api_key") in (None, "", "EMPTY"):
+        raise ValueError("Set DEEPSEEK_API_KEY in configs/secrets.env or the environment")
+    if vlm_cfg.get("wire_api") == "responses" and vlm_cfg.get("api_key") in (None, "", "EMPTY"):
+        name = vlm_cfg.get("api_key_env", "an API key")
+        raise ValueError(f"Set {name} in configs/secrets.env or the environment")
     return VLMClient(
         base_url=vlm_cfg["base_url"],
         model=vlm_cfg["model"],
@@ -64,11 +96,11 @@ def make_vlm_client(args: argparse.Namespace, cfg: dict[str, Any]):
         reasoning_directive=vlm_cfg.get("reasoning_directive"),
         provider=vlm_cfg.get("provider", "vllm"),
         api_dialect=vlm_cfg.get("api_dialect"),
+        wire_api=vlm_cfg.get("wire_api", "chat_completions"),
         reasoning_effort=vlm_cfg.get("reasoning_effort"),
+        thinking_mode=vlm_cfg.get("thinking_mode"),
         max_retries=vlm_cfg.get("max_retries"),
         retry_base_delay_s=vlm_cfg.get("retry_base_delay_s"),
         retry_max_delay_s=vlm_cfg.get("retry_max_delay_s"),
         api_key_refresh=make_api_key_refresher(vlm_cfg),
     )
-
-

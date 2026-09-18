@@ -59,6 +59,8 @@ REAL_CONFIGS = (
 SIM_CONFIGS = (
     "robot_maniskill.yaml",
     "robot_robolab.yaml",
+    "robot_piper_isaaclab.yaml",
+    "robot_realman_dual_isaaclab.yaml",
 )
 
 

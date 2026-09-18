@@ -100,6 +100,7 @@ class EpisodeLogger:
         self.run_dir = base_dir / date_stamp / f"task_{task_id}" / time_stamp
         self.agentview_dir = self.run_dir / "images" / "agentview"
         self.wrist_dir = self.run_dir / "images" / "wrist"
+        self.overview_dir = self.run_dir / "images" / "overview"
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self._steps_path = self.run_dir / "steps.jsonl"
         self._steps_file = self._steps_path.open("w", encoding="utf-8")
@@ -158,6 +159,7 @@ class EpisodeLogger:
         agentview: np.ndarray,
         wrist: Optional[Any],
         record: dict[str, Any],
+        overview: Optional[np.ndarray] = None,
     ) -> None:
         """``wrist`` is one frame (single-arm), or a [left, right] pair (dual-arm) --
         the pair is stored side by side and rendered as separate analysis panels."""
@@ -172,6 +174,8 @@ class EpisodeLogger:
                 else wrist
             )
             save_png(wrist_path, stored)
+        if overview is not None:
+            save_png(self.overview_dir / f"{step_idx:04d}.png", overview)
         self._logged_steps.add(int(step_idx))
         # steps.json keeps the full reasoning; steps.jsonl gets a reasoning-truncated copy.
         self._full_records.append(_jsonable(record))
@@ -181,7 +185,12 @@ class EpisodeLogger:
         )
         self._steps_file.flush()
         self.video.append(
-            _make_analysis_frame(agentview=agentview, wrist=wrist, record=record)
+            _make_analysis_frame(
+                agentview=agentview,
+                wrist=wrist,
+                record=record,
+                overview=overview,
+            )
         )
 
     def log_debug_payload(self, step_idx: int, payload: dict[str, Any]) -> None:
@@ -252,6 +261,7 @@ class EpisodeLogger:
         "wrist": ("wrist_dir", ""),
         "wrist_left": ("wrist_dir", "left half of the side-by-side png"),
         "wrist_right": ("wrist_dir", "right half of the side-by-side png"),
+        "overview": ("overview_dir", ""),
     }
 
     def _render_frame(self, step_idx: int, entry: dict, frame: dict) -> str:
@@ -348,23 +358,34 @@ _BAD_C = (220, 38, 38)         # red
 
 
 def _make_analysis_frame(
-    agentview: np.ndarray, wrist: Optional[Any], record: dict[str, Any]
+    agentview: np.ndarray,
+    wrist: Optional[Any],
+    record: dict[str, Any],
+    overview: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """Compose one polished, information-dense frame of the saved rollout video."""
     if isinstance(wrist, (list, tuple)):
         # Left - Agent - Right: each wrist sits on its own arm's side of the
         # shared front view, so the layout mirrors the physical rig.
         wrist_left, wrist_right = (np.asarray(w) for w in wrist)
-        views = [wrist_left, agentview, wrist_right]
-        labels = ["WRIST · LEFT", "AGENT VIEW", "WRIST · RIGHT"]
-        accents = [ACC_LEFT, ACC_NEUTRAL, ACC_RIGHT]
+        if overview is not None:
+            views = [overview, wrist_left, agentview, wrist_right]
+            labels = ["ISAAC OVERVIEW", "WRIST · LEFT", "AGENT VIEW", "WRIST · RIGHT"]
+            accents = [ACC_NEUTRAL, ACC_LEFT, ACC_NEUTRAL, ACC_RIGHT]
+        else:
+            views = [wrist_left, agentview, wrist_right]
+            labels = ["WRIST · LEFT", "AGENT VIEW", "WRIST · RIGHT"]
+            accents = [ACC_LEFT, ACC_NEUTRAL, ACC_RIGHT]
     else:
-        views = [
-            agentview,
-            wrist if wrist is not None else np.zeros_like(to_uint8_hwc(agentview)),
-        ]
-        labels = ["AGENT VIEW", "WRIST"]
-        accents = [ACC_NEUTRAL, ACC_NEUTRAL]
+        wrist_view = wrist if wrist is not None else np.zeros_like(to_uint8_hwc(agentview))
+        if overview is not None:
+            views = [overview, agentview, wrist_view]
+            labels = ["TASK MAP", "AGENT VIEW", "WRIST"]
+            accents = [ACC_NEUTRAL, ACC_NEUTRAL, ACC_NEUTRAL]
+        else:
+            views = [agentview, wrist_view]
+            labels = ["AGENT VIEW", "WRIST"]
+            accents = [ACC_NEUTRAL, ACC_NEUTRAL]
 
     width = _PANEL * len(views)
     panels_y = _HEADER_H + _REASON_H + _LABEL_H
@@ -416,7 +437,11 @@ def _make_analysis_frame(
     draw.line((0, band_y, width, band_y), fill=RULE_C, width=1)
     dual = isinstance(record.get("left"), dict) and isinstance(record.get("right"), dict)
     if dual:
-        bands = {0: ("LEFT", ACC_LEFT, record["left"]), 2: ("RIGHT", ACC_RIGHT, record["right"])}
+        left_idx, right_idx = ((1, 3) if overview is not None else (0, 2))
+        bands = {
+            left_idx: ("LEFT", ACC_LEFT, record["left"]),
+            right_idx: ("RIGHT", ACC_RIGHT, record["right"]),
+        }
     else:
         bands = {1: ("ARM", ACC_NEUTRAL, record)}
     for idx, (name, accent, rec) in bands.items():

@@ -76,6 +76,23 @@ class OverlayTests(unittest.TestCase):
 
 
 class SecretsPrecedenceTests(unittest.TestCase):
+    def test_inline_comments_do_not_become_part_of_api_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            env_file = Path(d) / "s.env"
+            env_file.write_text(
+                'QUOTED_TEST_KEY="sk-test#inside"  # vision (example)\n'
+                "UNQUOTED_TEST_KEY=sk-test # example\n"
+                "HASH_TEST_KEY=sk-test#inside\n"
+            )
+            try:
+                parsed = load_secrets_env(env_file, override=True)
+                self.assertEqual(parsed["QUOTED_TEST_KEY"], "sk-test#inside")
+                self.assertEqual(parsed["UNQUOTED_TEST_KEY"], "sk-test")
+                self.assertEqual(parsed["HASH_TEST_KEY"], "sk-test#inside")
+            finally:
+                for key in ("QUOTED_TEST_KEY", "UNQUOTED_TEST_KEY", "HASH_TEST_KEY"):
+                    os.environ.pop(key, None)
+
     def test_explicit_path_and_shell_precedence(self) -> None:
         with tempfile.TemporaryDirectory() as d:
             env_file = Path(d) / "s.env"

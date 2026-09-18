@@ -34,6 +34,10 @@ Return a JSON plan with one ordered stage track PER ARM. The two tracks execute 
 -MERGE: Do NOT split immediate pre-grasp steps. Combine approach, align, lower, and close into a single `GRASP` stage
 -SEPARATE: Keep lift/clearance after a successful grasp as a separate `LIFT` stage
 -RETREAT: After every `RELEASE`, add a `RETREAT` stage that ONLY needs to lift the gripper up
+-TASK CLOSURE: Preserve every explicit final-state instruction in TASK. If TASK asks
+ to release/open, raise/retreat, or return home/reset, include distinct `RELEASE`,
+ `RETREAT`, and `RETURN` stages in that order for each affected arm. Never stop the
+ plan after placement while an explicit closure action remains.
 
 3. Cross-Arm Coordination
 

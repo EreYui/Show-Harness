@@ -26,6 +26,7 @@ def _fragment(section: str) -> str:
 RELEASE_TOKEN = "RELEASE"
 GRASP_TOKEN = "GRASP"
 STOP_TOKEN = "STOP"
+MOVE_TOKENS = {"MV_FWD", "MV_BACK", "MV_LEFT", "MV_RIGHT", "MV_UP", "MV_DOWN"}
 
 # How many consecutive steps to HOLD while a just-commanded close has not settled (the
 # width sensor still reads the open band right after the close). Bounded so a genuinely
@@ -62,12 +63,25 @@ class RecoveryPlugin:
         enabled: bool = True,
         empty_width_m: float = 0.005,
         open_width_m: float = 0.06,
+        empty_realign_token: str | None = None,
     ) -> None:
         self.enabled = bool(enabled)
         self.empty_width_m = max(0.0, float(empty_width_m))
         self.open_width_m = max(self.empty_width_m, float(open_width_m))
+        token = str(empty_realign_token or "").strip().upper()
+        if token and token not in MOVE_TOKENS:
+            raise ValueError(
+                f"empty_realign_token must be one of {sorted(MOVE_TOKENS)}, got {token!r}"
+            )
+        self.empty_realign_token = token or None
+        self._pending_realign_token: str | None = None
         # Consecutive "close not settled yet" holds issued, bounded by MAX_UNSETTLED_HOLDS.
         self._unsettled_holds = 0
+
+    def reset(self) -> None:
+        """Clear episode-local settling and one-shot recovery state."""
+        self._unsettled_holds = 0
+        self._pending_realign_token = None
 
     def render_prompt_context(self, note: str) -> str:
         """Return a short controller context line for the last recovery event."""
@@ -105,22 +119,46 @@ class RecoveryPlugin:
                    wide grasp eventually proceeds.
         holding -> a verified hold; no intervention.
         """
-        if not self.enabled or not gripper_closed:
+        if not self.enabled:
+            self.reset()
+            return None
+        if not gripper_closed:
             self._unsettled_holds = 0
+            if self._pending_realign_token:
+                token = self._pending_realign_token
+                self._pending_realign_token = None
+                return RecoveryDecision(
+                    event="empty_grasp_realign",
+                    reason=f"configured one-shot empty-grasp realignment: {token}",
+                    token=token,
+                    reset_history=True,
+                    prompt_note=(
+                        "The empty close was released and the configured camera/gripper "
+                        f"offset correction {token} was applied once. Re-check alignment."
+                    ),
+                )
             return None
         phase = self.phase_from_width(measured_width_m)
+        stage = (
+            _motion(subgoals[current_index])
+            if 0 <= current_index < len(subgoals)
+            else ""
+        )
+
+        # A verified PLACE advances into RELEASE while the fingers may already read
+        # empty because the support surface carries the object. Let the controller
+        # execute the explicit RELEASE stage instead of rewinding a completed place.
+        if stage == RELEASE_TOKEN and phase == "empty":
+            self._unsettled_holds = 0
+            return None
 
         if phase == "empty":
             self._unsettled_holds = 0
             rollback = _nearest_grasp_index(subgoals, current_index)
             if rollback is None:
                 return None
-            stage = (
-                _motion(subgoals[current_index])
-                if 0 <= current_index < len(subgoals)
-                else ""
-            )
             event = "empty_grasp" if stage == GRASP_TOKEN else "lost_grasp"
+            self._pending_realign_token = self.empty_realign_token
             reason = (
                 f"closed gripper width {float(measured_width_m):.4f}m <= "
                 f"empty threshold {self.empty_width_m:.4f}m"

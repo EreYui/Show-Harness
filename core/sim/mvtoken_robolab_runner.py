@@ -54,6 +54,19 @@ FALLBACK_TOKEN = "MV_DOWN"
 RECENT_MOVES_MAX = 5  # match the MVTOKEN training window (MV_* only, newest first)
 
 
+class RobolabBackend:
+    """Observation and stepping interface used by the shared Isaac Lab rollout loop."""
+
+    hold_orientation = True
+    reset = staticmethod(reset_robolab)
+    step = staticmethod(step_robolab)
+    rgb = staticmethod(rl_rgb)
+    tcp = staticmethod(rl_tcp)
+    ee_quat = staticmethod(rl_ee_quat)
+    gripper_width = staticmethod(rl_gripper_width)
+    success = staticmethod(rl_success)
+
+
 # The full camera transform contract lives in core.record.images.prepare_view -- shared with the
 # ManiSkill runner and with the real2sim generators, so agentview and wrist go through one
 # code path and stored frames stay byte-identical to sent frames.
@@ -92,8 +105,12 @@ class MvTokenRobolabRunner:
         wrist_square_size: Optional[int] = None,
         gripper_hold_steps: int = 0,
         close_env: bool = False,
+        backend: Any = None,
+        control_mode: str = "robolab_mvtoken",
     ) -> None:
         self.env = env
+        self.backend = backend if backend is not None else RobolabBackend()
+        self.control_mode = str(control_mode)
         self.task_description = str(task_description)
         self.controller = controller
         self.agent = agent
@@ -151,7 +168,7 @@ class MvTokenRobolabRunner:
         # Cleared before the reset so the hold action does not correct toward the
         # PREVIOUS episode's reference while the arm is being teleported home.
         self.controller.set_orientation_reference(None)
-        obs, terminated, truncated = reset_robolab(
+        obs, terminated, truncated = self.backend.reset(
             self.env,
             hold_action=self.controller.open_gripper(),
             settle_steps=self.num_steps_wait,
@@ -159,11 +176,14 @@ class MvTokenRobolabRunner:
         # The home pose IS the contract's top-down orientation; latch it as the reference
         # the whole episode is held to. Identical to what the generator does at reset, so
         # deployment reproduces the geometry the data was recorded under.
-        self.controller.set_orientation_reference(rl_ee_quat(self.env))
-        success = bool(terminated) or rl_success(self.env)
+        self.controller.set_orientation_reference(
+            self.backend.ee_quat(self.env) if getattr(self.backend, "hold_orientation", True) else None
+        )
+        success = bool(terminated) or self.backend.success(self.env)
         end_reason = "max_steps_exceeded"
         steps = 0
         recent_moves: list[str] = []
+        last_descent: dict[str, float] = {}
         video_path: Any = self.logger.run_dir / "rollout_failure.mp4"
 
         try:
@@ -176,14 +196,39 @@ class MvTokenRobolabRunner:
                     "closed" if self.controller.state.gripper_name == "CLOSE" else "open"
                 )
                 try:
-                    response: Any = self.agent.decide(
+                    decide_kwargs = dict(
                         task=self.task_description,
                         gripper_state=gripper_state,
                         recent_moves=self._recent_moves_text(recent_moves),
                         agentview_image=agentview,
                         wrist_image=wrist,
                         debug=self.debug,
+                        **last_descent,
                     )
+                    if self.control_mode.startswith("piper_isaaclab_"):
+                        tcp_position = self.backend.tcp(self.env)
+                        finger_width = self.backend.gripper_width(self.env)
+                        policy_state = (
+                            self.env.policy_state()
+                            if callable(getattr(self.env, "policy_state", None)) else {}
+                        )
+                        if policy_state:
+                            piper_phase = policy_state["phase"]
+                        elif gripper_state == "closed":
+                            piper_phase = "CUBE_HELD" if finger_width >= 0.020 else "EMPTY_GRASP"
+                        elif tcp_position[2] <= getattr(self.env, "min_tcp_z_m", 0.025) + 0.005:
+                            piper_phase = "AT_GRASP_HEIGHT"
+                        else:
+                            piper_phase = "APPROACH"
+                        decide_kwargs.update(
+                            tcp_position_m=tcp_position,
+                            finger_width_m=finger_width,
+                            piper_phase=piper_phase,
+                            cube_position_m=policy_state.get("cube_position_m"),
+                            target_position_m=policy_state.get("target_position_m"),
+                            home_position_m=policy_state.get("home_position_m"),
+                        )
+                    response: Any = self.agent.decide(**decide_kwargs)
                     token = response.token
                 except RuntimeError as exc:
                     print(
@@ -207,8 +252,22 @@ class MvTokenRobolabRunner:
                     end_reason = "done"
                     break
 
-                obs, terminated, truncated = self._execute(token, obs)
-                success = bool(terminated) or rl_success(self.env)
+                before_z = float(self.backend.tcp(self.env)[2])
+                step_m = None
+                step_selector = getattr(self.agent, "movement_step_m", None)
+                if token in MOVE_ATOMS and callable(step_selector) and response is not None:
+                    step_m = float(step_selector(token, response, before_z))
+                obs, terminated, truncated = self._execute(token, obs, step_m=step_m)
+                after_z = float(self.backend.tcp(self.env)[2])
+                last_descent = (
+                    {
+                        "descend_moved_m": max(0.0, before_z - after_z),
+                        "descend_commanded_m": float(step_m or self.controller.step_m),
+                    }
+                    if token == "MV_DOWN"
+                    else {}
+                )
+                success = bool(terminated) or self.backend.success(self.env)
 
                 # Reflex, not policy: if that step left the gripper closed on nothing,
                 # reopen it now so the next decision sees an open gripper.
@@ -217,11 +276,14 @@ class MvTokenRobolabRunner:
                     obs, term2, trunc2 = released
                     terminated = terminated or term2
                     truncated = truncated or trunc2
-                    success = bool(success or terminated or rl_success(self.env))
+                    success = bool(success or terminated or self.backend.success(self.env))
 
                 if token in MOVE_ATOMS:
                     recent_moves.insert(0, token)
                     del recent_moves[RECENT_MOVES_MAX:]
+                zero_shot = (getattr(response, "payload", None) or {}).get("zero_shot")
+                if isinstance(zero_shot, dict) and zero_shot.get("reset_history"):
+                    recent_moves.clear()
 
                 self.logger.log_step(
                     step_idx=step_idx,
@@ -234,6 +296,7 @@ class MvTokenRobolabRunner:
                         success,
                         terminated or truncated,
                         auto_released=released is not None,
+                        step_m=step_m,
                     ),
                 )
 
@@ -262,7 +325,7 @@ class MvTokenRobolabRunner:
                     "end_reason": end_reason,
                     "video_path": str(video_path),
                     "run_dir": str(self.logger.run_dir),
-                    "control_mode": "robolab_mvtoken",
+                    "control_mode": self.control_mode,
                     "task": self.task_description,
                 }
             )
@@ -281,7 +344,9 @@ class MvTokenRobolabRunner:
         )
 
     # -- helpers -----------------------------------------------------------
-    def _execute(self, token: str, obs: dict) -> tuple[dict, bool, bool]:
+    def _execute(
+        self, token: str, obs: dict, *, step_m: float | None = None
+    ) -> tuple[dict, bool, bool]:
         """Apply one token: N motion steps + M settle steps, gripper tokens held.
 
         Returns the observation AFTER the whole decision, plus the accumulated
@@ -290,7 +355,11 @@ class MvTokenRobolabRunner:
         """
         terminated = truncated = False
         if token in MOVE_ATOMS:
-            action = self.controller.action_for_atomic(token)
+            action = self.controller.action_for_atomic(
+                token,
+                step_m=step_m,
+                ee_quat=self.backend.ee_quat(self.env),
+            )
             motion_steps = self.sim_steps_per_decision
             settle_steps = self.settle_steps_per_decision
         elif token in (GRASP_TOKEN, RELEASE_TOKEN):
@@ -312,18 +381,18 @@ class MvTokenRobolabRunner:
         # keep commanding a rotation the arm has already made. (This is also why the
         # rotation slots cannot simply be baked into `action` above.)
         for _ in range(motion_steps):
-            obs, terminated, truncated, _info = step_robolab(
+            obs, terminated, truncated, _info = self.backend.step(
                 self.env,
-                self.controller.with_orientation_hold(action, rl_ee_quat(self.env)),
+                self.controller.with_orientation_hold(action, self.backend.ee_quat(self.env)),
             )
             if terminated or truncated:
                 return obs, terminated, truncated
         if settle_steps:
             hold = self.controller.hold_action()
             for _ in range(settle_steps):
-                obs, terminated, truncated, _info = step_robolab(
+                obs, terminated, truncated, _info = self.backend.step(
                     self.env,
-                    self.controller.with_orientation_hold(hold, rl_ee_quat(self.env)),
+                    self.controller.with_orientation_hold(hold, self.backend.ee_quat(self.env)),
                 )
                 if terminated or truncated:
                     break
@@ -342,7 +411,7 @@ class MvTokenRobolabRunner:
         gripper_closed = self.controller.state.gripper_name == "CLOSE"
         if not gripper_closed:
             return None
-        width_m = rl_gripper_width(self.env)
+        width_m = self.backend.gripper_width(self.env)
         if not self.auto_release.should_release(width_m, gripper_closed):
             return None
         print(
@@ -353,14 +422,14 @@ class MvTokenRobolabRunner:
         obs = None
         terminated = truncated = False
         for _ in range(self.gripper_hold_steps or self.sim_steps_per_decision):
-            obs, terminated, truncated, _info = step_robolab(self.env, action)
+            obs, terminated, truncated, _info = self.backend.step(self.env, action)
             if terminated or truncated:
                 break
         return (obs, terminated, truncated) if obs is not None else None
 
     def _images(self, obs: dict[str, Any]):
         agentview = prepare_view(
-            rl_rgb(obs, self.agentview_camera),
+            self.backend.rgb(obs, self.agentview_camera),
             rotation_degrees=self.agentview_rotation_degrees,
             flip=self.agentview_flip,
             crop_aspect=self.agentview_crop_aspect,
@@ -368,7 +437,7 @@ class MvTokenRobolabRunner:
         )
         wrist = (
             prepare_view(
-                rl_rgb(obs, self.wrist_camera),
+                self.backend.rgb(obs, self.wrist_camera),
                 rotation_degrees=self.wrist_rotation_degrees,
                 flip=self.wrist_flip,
                 crop_aspect=self.wrist_crop_aspect,
@@ -391,21 +460,48 @@ class MvTokenRobolabRunner:
         success: bool,
         env_done: bool,
         auto_released: bool = False,
+        step_m: float | None = None,
     ) -> dict[str, Any]:
-        eef = rl_tcp(self.env)
+        eef = self.backend.tcp(self.env)
         record: dict[str, Any] = {
             "i": int(step_idx),
             "stage": "-",
             "act": token,
             "eef": [round(float(x), 3) for x in eef],
-            "w": round(rl_gripper_width(self.env), 5),
+            "w": round(self.backend.gripper_width(self.env), 5),
             "grip": self.controller.state.gripper_name,
         }
+        if self.control_mode.startswith("piper_isaaclab_") and callable(
+            getattr(self.env, "policy_state", None)
+        ):
+            state = self.env.policy_state()
+            record["stage"] = state["phase"]
+            for key in ("cube_position_m", "target_position_m", "home_position_m"):
+                value = state.get(key)
+                if value is not None:
+                    record[key.removesuffix("_position_m")] = [
+                        round(float(axis), 3) for axis in value
+                    ]
         if auto_released:
             record["auto_release"] = True
+        if step_m is not None:
+            record["step_m"] = round(float(step_m), 5)
         latency_s = (getattr(response, "payload", None) or {}).get("latency_s")
         if latency_s is not None:
             record["vlm_ms"] = int(round(float(latency_s) * 1000.0))
+        if response is not None:
+            response_payload = getattr(response, "payload", None) or {}
+            record["vlm"] = {
+                "c": {
+                    "raw": getattr(response, "raw_text", "") or "",
+                    "reasoning_content": response_payload.get(
+                        "reasoning_content", ""
+                    ),
+                }
+            }
+        zero_shot = (getattr(response, "payload", None) or {}).get("zero_shot")
+        if isinstance(zero_shot, dict):
+            record["zero_shot"] = zero_shot
         if success:
             record["ok"] = True
         if env_done:

@@ -92,14 +92,22 @@ class DualMvTokenController:
         # views for every scheme -- see decide().
         self.last_media: list[dict] = []
 
-    def _render(self, task: str, recent_left: str, recent_right: str, arm: str = "") -> str:
+    def _render(
+        self,
+        task: str,
+        recent_left: str,
+        recent_right: str,
+        arm: str = "",
+        **runtime_fields: Any,
+    ) -> str:
         # once/chain templates carry no {arm} field; format() ignores the extra kwarg.
+        fields = {**self.extra_fields, **runtime_fields}
         return self.prompt_template.format(
             task=task,
             recent_left=recent_left or "none",
             recent_right=recent_right or "none",
             arm=arm.upper(),
-            **self.extra_fields,
+            **fields,
         )
 
     def decide(
@@ -111,6 +119,7 @@ class DualMvTokenController:
         wrist_left_image,
         wrist_right_image,
         debug: bool = False,
+        **runtime_fields: Any,
     ) -> DualDecision:
         # Three views in a fixed order: agentview, wrist_left, wrist_right. This is the order
         # the converter wrote into `images`, so it is the order the LoRA was trained on.
@@ -129,7 +138,9 @@ class DualMvTokenController:
             for side in SIDES:
                 # Each call is rendered for ITS arm. The right call is deliberately NOT told
                 # what the left one just chose -- that independence IS the scheme.
-                prompt = self._render(task, recent_left, recent_right, arm=side)
+                prompt = self._render(
+                    task, recent_left, recent_right, arm=side, **runtime_fields
+                )
                 self.last_prompt = prompt
                 response = self.client.complete_action_token(
                     prompt,
@@ -148,7 +159,7 @@ class DualMvTokenController:
                 payload={"latency_s": latency_s, "scheme": "twice"},
             )
 
-        prompt = self._render(task, recent_left, recent_right)
+        prompt = self._render(task, recent_left, recent_right, **runtime_fields)
         self.last_prompt = prompt
 
         if self.scheme == "once":

@@ -25,6 +25,10 @@ Return an ordered JSON plan:
 -MERGE: Do NOT split immediate pre-grasp steps. Combine approach, align, lower, and close into a single `GRASP` stage
 -SEPARATE: Keep lift/clearance after a successful grasp as a separate `LIFT` stage
 -RETREAT: After every `RELEASE`, add a `RETREAT` stage that lifts the gripper up
+-TASK CLOSURE: Preserve every explicit final-state instruction in TASK. If TASK asks
+ to release/open, raise/retreat, or return home/reset, include distinct `RELEASE`,
+ `RETREAT`, and `RETURN` stages in that order. Never stop the plan after placement
+ while an explicit closure action remains.
 
 2. Affordance Selection
 

@@ -1,0 +1,164 @@
+# Standalone Isaac Lab 2.2 / Isaac Sim 5 single-arm Piper pick-and-lift scene.
+# The AgileX USD is external; --piper-usd or PIPER_USD overrides the default
+# ~/piper_isaac_sim/piper_description/urdf/piper_description_v100_realsense_camera_v2/
+# piper_description_v100_realsense_camera_v2.usd.
+overlays:
+  - {path: experiments/current_sims.yaml, optional: true}
+
+robot: piper
+piper_task: pick_lift
+task_description: Pick up the red cube from the table.
+device: cuda:0
+headless: true
+episodes: 1
+physics_dt: 0.008333333333333333
+max_physics_steps: 4000
+
+# Single-arm scene. Verified on the installed AgileX Piper USD in Isaac Lab 2.2.
+home_joints: [0.0, 1.0, -0.35, 0.0, 0.0, 0.0]
+gripper_open_m: 0.05           # joint7=+0.05 and joint8=-0.05; close=0/0
+cube_xy: [0.30, 0.0]
+cube_size_m: 0.04
+cube_lift_m: 0.08             # success: cube lifted this far and near closed gripper
+min_tcp_z_m: 0.025            # clamp downward commands above the tabletop
+transport_tcp_z_m: 0.12       # safe carry height for pick-place variants
+target_xy_tolerance_m: 0.018
+target_success_tolerance_m: 0.04
+target_size_m: 0.09
+
+# Select with --task. The pick-place variants require roughly 25-30 policy
+# decisions instead of the 11-step pick-lift smoke test.
+piper_tasks:
+  pick_lift:
+    task_description: Pick up the red cube from the table and lift it at least 8 cm.
+  pick_place_left:
+    task_description: >-
+      Pick up the red cube and place it on the green target pad to the left. Release it,
+      raise the open gripper, and return the arm to its initial home pose.
+    target_xy: [0.30, 0.18]
+  pick_place_forward:
+    task_description: >-
+      Pick up the red cube and place it on the green target pad near the far edge. Release it,
+      raise the open gripper, and return the arm to its initial home pose.
+    target_xy: [0.44, 0.0]
+
+# Camera poses are in the robot's world frame. The wrist sensor attaches to AgileX's
+# d435_camera_link, not the Franka wrist camera used by RoboLab.
+camera_width: 640
+camera_height: 480
+agentview_pose:
+  pos: [0.6, -0.55, 0.42]
+  rot: [0.490000, -0.241035, 0.143086, 0.825426]   # world convention, looks at cube
+wrist_pose:
+  pos: [0.0, 0.0, 0.0]
+  # ROS-camera offset from the AgileX d435_camera_link. Computed from its URDF
+  # at home_joints to look down at cube_xy; verified in the rendered scene.
+  rot: [0.349052, -0.704123, 0.439452, -0.435035]
+agentview_camera: agentview_camera
+wrist_camera: wrist_camera
+agentview_rotation_degrees: 0
+wrist_rotation_degrees: 0
+agentview_flip: none
+wrist_flip: none
+use_wrist_image: true
+agentview_crop_aspect: null
+wrist_crop_aspect: 1.3333
+agentview_square_size: 256
+wrist_square_size: 256
+
+# Piper's base frame uses +X forward and +Y robot-left (primitives_piper.yaml).
+# 2.3 cm command yields about 2 cm of measured TCP motion per token.
+step_m: 0.023
+# The formal zero-shot controller uses a precise step near a visible target and the
+# calibrated full step while high/far. The adapted Piper policy continues to use step_m.
+zero_shot_fine_step_m: 0.010
+zero_shot_coarse_step_m: 0.023
+high_above_table_m: 0.005
+motion_frame: base
+is_ego: false
+coords_positive_y_token: MV_LEFT
+coords_positive_y_image_edge: left
+coords_include_goal_error: true
+coords_enforce_goal_error: true
+# The oblique simulation camera mirrors base +Y relative to controller.txt's front-view
+# convention. Flip only the generic zero-shot input; the adapted policy retains its view.
+original_zero_shot_agentview_flip: horizontal
+original_zero_shot_wrist_flip: horizontal
+sim_steps_per_decision: 40
+settle_steps_per_decision: 0
+gripper_hold_steps: 15
+max_delta_m: 0.02
+move_vectors:
+  MV_FWD: [1.0, 0.0, 0.0]
+  MV_BACK: [-1.0, 0.0, 0.0]
+  MV_LEFT: [0.0, 1.0, 0.0]
+  MV_RIGHT: [0.0, -1.0, 0.0]
+  MV_UP: [0.0, 0.0, 1.0]
+  MV_DOWN: [0.0, 0.0, -1.0]
+
+plugins:
+  auto_release: false
+  subgoal: true
+  proprioception: true
+  recovery: true
+  variable_step: true
+  mem_text: true
+  smooth: true
+  coords: true
+  mcq: false
+  action_chunk: false
+  rotation: false
+  view_select: false
+empty_width_m: 0.005
+open_width_m: 0.080
+num_steps_wait: 60
+max_steps: 80
+loop_period_s: 0.0
+log_dir: rollouts/piper_isaaclab
+v0:
+  video_fps: 5.0
+
+# The released sim LoRA was trained on ManiSkill + RoboLab, not this Piper
+# scene. Use it to smoke-test the loop; collect Piper demonstrations and
+# fine-tune before interpreting success rate as a policy benchmark.
+vlm_backend: qwen3_5_2b
+vlm:
+  base_url: http://localhost:8000/v1
+  timeout_s: 120
+  startup_wait_s: 600
+  startup_poll_s: 5
+  temperature: 0.0
+  api_key: EMPTY
+vlm_backends:
+  finetuned_local:
+    provider: vllm
+    model: your_piper_adapter_name
+    max_tokens: 256
+    reasoning_cot: false
+    chat_template_kwargs:
+      enable_thinking: false
+  qwen3_5_2b:
+    provider: vllm
+    model: qwen3_5_2b_showharness_sim
+    max_tokens: 256
+    reasoning_cot: false
+    chat_template_kwargs:
+      enable_thinking: false
+  # Hosted zero-shot vision baseline. Requires DEEPSEEK_API_KEY; no local VLM.
+  deepseek:
+    provider: deepseek
+    base_url: https://api.deepseek.com
+    model: deepseek-flash
+    api_key_env: DEEPSEEK_API_KEY
+    max_tokens: 128
+    thinking_mode: disabled
+  # HeyRoute Codex relay: Responses API. Verify two-image access before a rollout.
+  heyroute:
+    provider: openai
+    wire_api: responses
+    base_url: https://heyroute.ai/v1
+    model: gpt-5.6-sol
+    api_key_env: HEYROUTE_API_KEY
+    max_tokens: 256
+    reasoning_effort: low
+    max_retries: 2

@@ -62,7 +62,9 @@ class VLMClient:
         reasoning_directive: Optional[str] = None,
         provider: str = "vllm",
         api_dialect: Optional[str] = None,
+        wire_api: str = "chat_completions",
         reasoning_effort: Optional[str] = None,
+        thinking_mode: Optional[str] = None,
         max_retries: Optional[int] = None,
         retry_base_delay_s: Optional[float] = None,
         retry_max_delay_s: Optional[float] = None,
@@ -83,12 +85,18 @@ class VLMClient:
         self.reasoning_enabled = _reasoning_enabled(self.chat_template_kwargs)
         # provider names the endpoint/auth family. api_dialect selects the request shape:
         # "vllm" (local, guided decoding + chat_template_kwargs), "openai" (hosted
-        # OpenAI Chat Completions / Azure OpenAI deployments), or "gemini" (Gemini-style
-        # OpenAI-compatible endpoints). Hosted providers reject vLLM-only fields and need
-        # the payload rewritten (see _finalize_payload).
+        # OpenAI Chat Completions / Azure OpenAI deployments), "gemini", or
+        # "deepseek" (OpenAI-compatible endpoint with max_tokens and thinking).
+        # Hosted providers reject vLLM-only fields; see _finalize_payload.
         self.provider = str(provider or "vllm").lower()
         self.api_dialect = str(api_dialect or self.provider).lower()
+        self.wire_api = str(wire_api or "chat_completions").lower()
+        if self.wire_api not in ("chat_completions", "responses"):
+            raise ValueError("wire_api must be 'chat_completions' or 'responses'")
         self.reasoning_effort = reasoning_effort or None
+        self.thinking_mode = thinking_mode or None
+        if self.thinking_mode not in (None, "enabled", "disabled"):
+            raise ValueError("thinking_mode must be 'enabled' or 'disabled'")
         # Rate-limit / transient-error retry (on by default; tune via vlm_backends).
         self.max_retries = DEFAULT_MAX_RETRIES if max_retries is None else max(0, int(max_retries))
         self.retry_base_delay_s = (
@@ -121,12 +129,16 @@ class VLMClient:
     def _is_gemini(self) -> bool:
         return self.api_dialect == "gemini"
 
+    def _is_deepseek(self) -> bool:
+        return self.api_dialect == "deepseek"
+
     def _is_hosted(self) -> bool:
         """Hosted OpenAI-compatible APIs reject vLLM-only fields
         (chat_template_kwargs / guided_* / logprobs) and need a rewritten payload."""
-        return self.provider in ("openai", "gemini") or self.api_dialect in (
+        return self.provider in ("openai", "gemini", "deepseek") or self.api_dialect in (
             "openai",
             "gemini",
+            "deepseek",
         )
 
     def _finalize_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -140,11 +152,50 @@ class VLMClient:
           * openai: max_tokens -> max_completion_tokens; temperature only forwarded when
             it is the default 1.0 (reasoning models reject a custom value); reasoning_effort
             added when set.
-          * gemini: standard max_tokens and temperature (0.0 is accepted and wanted for
-            determinism); reasoning_effort forwarded when set (Gemini 2.5+/3.x thinking
-            models accept it via the OpenAI-compat layer; omitted otherwise so non-thinking
-            models like flash-lite are unaffected).
+          * gemini/deepseek: standard max_tokens and temperature. DeepSeek additionally
+            uses the thinking object to select non-thinking mode for atomic actions.
         """
+        # Hosted DeepSeek has a wire-level thinking switch, while the planner and
+        # strict token retries use the existing per-call no-thinking chat kwargs.
+        # Resolve those kwargs before hosted-only fields are discarded so a
+        # thinking-enabled controller does not force its JSON planner to monologue.
+        deepseek_thinking = self.thinking_mode
+        chat_kwargs = payload.get("chat_template_kwargs") or {}
+        if self._is_deepseek():
+            if chat_kwargs.get("enable_thinking") is False or chat_kwargs.get("thinking") is False:
+                deepseek_thinking = "disabled"
+            elif chat_kwargs.get("enable_thinking") is True or chat_kwargs.get("thinking") is True:
+                deepseek_thinking = "enabled"
+
+        if self.wire_api == "responses":
+            messages = []
+            for message in payload["messages"]:
+                source = message["content"]
+                if isinstance(source, str):
+                    source = [{"type": "text", "text": source}]
+                content = []
+                for part in source:
+                    if part["type"] == "text":
+                        content.append({"type": "input_text", "text": part["text"]})
+                    elif part["type"] == "image_url":
+                        content.append({
+                            "type": "input_image",
+                            "image_url": part["image_url"]["url"],
+                        })
+                    else:
+                        raise ValueError(f"Unsupported Responses input part: {part['type']}")
+                messages.append({"role": message["role"], "content": content})
+            out: dict[str, Any] = {
+                "model": payload["model"],
+                "input": messages,
+                "max_output_tokens": payload["max_tokens"],
+                "store": False,
+            }
+            if self.reasoning_effort:
+                out["reasoning"] = {"effort": self.reasoning_effort}
+            if "guided_json" in payload:
+                out["text"] = {"format": {"type": "json_object"}}
+            return out
         if not self._is_hosted():
             return payload
         out: dict[str, Any] = {"model": payload["model"], "messages": payload["messages"]}
@@ -154,16 +205,25 @@ class VLMClient:
             temperature = payload.get("temperature")
             if temperature is not None and float(temperature) == 1.0:
                 out["temperature"] = 1.0
-        else:  # gemini
+        else:  # gemini / deepseek
             if "max_tokens" in payload:
                 out["max_tokens"] = payload["max_tokens"]
             temperature = payload.get("temperature")
-            if temperature is not None:
+            # DeepSeek documents temperature as having no effect in thinking mode.
+            # Omitting it makes the wire request unambiguous and avoids proxy-specific
+            # validation failures for a parameter the model will ignore anyway.
+            if temperature is not None and not (
+                self._is_deepseek() and deepseek_thinking == "enabled"
+            ):
                 out["temperature"] = float(temperature)
         # reasoning_effort applies to thinking models on both hosted providers; forward it
         # only when configured (chat / non-thinking models omit it).
-        if self.reasoning_effort:
+        if self.reasoning_effort and not (
+            self._is_deepseek() and deepseek_thinking == "disabled"
+        ):
             out["reasoning_effort"] = self.reasoning_effort
+        if self._is_deepseek() and deepseek_thinking:
+            out["thinking"] = {"type": deepseek_thinking}
         if "guided_json" in payload:
             out["response_format"] = {"type": "json_object"}
         return out
@@ -187,7 +247,15 @@ class VLMClient:
         return True
 
     def _post_chat(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """POST to /chat/completions and return the parsed completion body, with
+        """POST to /chat/completions and return the parsed completion body."""
+        return self._post_json(payload, "chat/completions", _chat_completion_data, "chat completion")
+
+    def _post_responses(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """POST to /responses and return a validated Responses body."""
+        return self._post_json(payload, "responses", _responses_data, "response")
+
+    def _post_json(self, payload, endpoint, parse_body, label) -> dict[str, Any]:
+        """POST with
         retry+backoff on rate limits (HTTP 429), transient HTTP errors (408/409/425/5xx),
         network errors, and malformed "successful" bodies -- a relaying proxy (e.g. the
         showrobot Gemini tunnel) can answer 2xx with an error JSON, an HTML page, or an
@@ -196,7 +264,7 @@ class VLMClient:
         Retry-After header or a provider 'retry in Xs' / 'retryDelay' body hint; otherwise
         exponential backoff with jitter. Raises RuntimeError on a non-retryable error
         (e.g. 400/401/404) or once ``max_retries`` is exhausted."""
-        url = f"{self.base_url}/chat/completions"
+        url = f"{self.base_url}/{endpoint}"
         delay = self.retry_base_delay_s
         last = "unknown error"
         auth_refreshed = False  # at most one credential reload per request
@@ -219,10 +287,10 @@ class VLMClient:
                 last = f"request error: {exc}"  # network/tunnel hiccup -> retry
             else:
                 if resp.status_code < 400:
-                    data, problem = _chat_completion_data(resp)
+                    data, problem = parse_body(resp)
                     if data is not None:
                         return data
-                    last = f"bad completion body: {problem}"  # proxy glitch -> retry
+                    last = f"bad {label} body: {problem}"  # proxy glitch -> retry
                 else:
                     last = f"HTTP {resp.status_code}: {resp.text[:1000]}"
                     if resp.status_code in (401, 403):
@@ -234,7 +302,7 @@ class VLMClient:
                             print("[vlm] auth rejected; retrying with the refreshed API key")
                             continue
                         raise RuntimeError(
-                            f"VLM chat completion failed: {last} -- the API token is "
+                            f"VLM {label} failed: {last} -- the API token is "
                             "invalid or expired and no fresher one was found in "
                             "configs/secrets.env. Refresh the key for this backend "
                             "(short-lived tokens need their refresher running), then retry."
@@ -243,7 +311,7 @@ class VLMClient:
                         resp.status_code in RETRYABLE_STATUS_CODES
                         or 500 <= resp.status_code < 600
                     ):
-                        raise RuntimeError(f"VLM chat completion failed: {last}")
+                        raise RuntimeError(f"VLM {label} failed: {last}")
                     hinted = _retry_after_seconds(resp)
                     if hinted is not None:
                         # Honour the provider's stated wait FULLY (+1s margin) so the
@@ -267,7 +335,7 @@ class VLMClient:
             time.sleep(wait)
             delay = min(delay * 2, self.retry_max_delay_s)
         raise RuntimeError(
-            f"VLM chat completion failed after {self.max_retries} retries: {last}"
+            f"VLM {label} failed after {self.max_retries} retries: {last}"
         )
 
     def health_check(self, wait_s: float = 0.0, poll_s: float = 5.0) -> None:
@@ -299,6 +367,25 @@ class VLMClient:
                     )
                 raise RuntimeError(f"{hint} Last error: {last_error}") from last_error
             time.sleep(max(0.5, float(poll_s)))
+
+    def verify_model_available(self) -> None:
+        """Fail before launching a simulator if the authenticated API omits this model."""
+        url = f"{self.base_url}/models"
+        try:
+            response = self.session.get(url, timeout=min(self.timeout_s, 20.0))
+            response.raise_for_status()
+            data = response.json()
+        except (requests.RequestException, ValueError) as exc:
+            raise RuntimeError(f"Could not check model availability at {url}: {exc}") from exc
+        models = data.get("data") if isinstance(data, dict) else None
+        if not isinstance(models, list):
+            raise RuntimeError(f"Unexpected model list from {url}")
+        available = {item.get("id") for item in models if isinstance(item, dict)}
+        if self.model not in available:
+            raise RuntimeError(
+                f"Model {self.model!r} is not listed for this API key at {url}; "
+                f"available models: {sorted(str(x) for x in available if x)}"
+            )
 
     def complete_token(
         self,
@@ -405,6 +492,18 @@ class VLMClient:
         """
         if not allowed_tokens:
             raise ValueError("allowed_tokens must not be empty")
+        if self._is_deepseek() or self.wire_api == "responses":
+            # The hosted vision model is zero-shot on this action vocabulary.
+            # Use the strict retry path when its first answer is not a token.
+            return self.complete_token(
+                prompt,
+                allowed_tokens,
+                agentview_image,
+                wrist_image=wrist_image,
+                debug=debug,
+                agentview_label=None,
+                wrist_label=None,
+            )
         content = _message_content(
             prompt,
             agentview_image,
@@ -583,16 +682,24 @@ class VLMClient:
         latency_s = time.monotonic() - started
         # strip_reasoning=False keeps the <think>...</think> chain-of-thought in the
         # text (for CoT logging/analysis); token recovery still finds the answer.
-        message_text = _message_text(data["choices"][0]["message"])
+        message = data["choices"][0]["message"]
+        message_text = _message_text(message)
+        reasoning_content = str(message.get("reasoning_content") or "").strip()
         raw_text = (
             _strip_reasoning_artifacts(message_text)
             if strip_reasoning
-            else message_text
+            else "\n".join(part for part in (reasoning_content, message_text) if part)
         )
+        response_data = data if debug else {}
+        if reasoning_content:
+            # Keep the provider's reasoning channel available in episode logs even
+            # when debug mode is off; this is the evidence that thinking was active.
+            response_data = dict(response_data)
+            response_data["reasoning_content"] = reasoning_content
         return VLMResponse(
             token="",
             raw_text=raw_text.strip(),
-            payload=_response_payload(data if debug else {}, latency_s),
+            payload=_response_payload(response_data, latency_s),
         )
 
     def complete_json(
@@ -665,12 +772,47 @@ class VLMClient:
     def _post_completion(self, payload: dict[str, Any]) -> tuple[dict[str, Any], str, float]:
         payload = self._finalize_payload(payload)
         started = time.monotonic()
-        data = self._post_chat(payload)
+        if self.wire_api == "responses":
+            data = self._post_responses(payload)
+            raw_text = _responses_output_text(data)
+        else:
+            data = self._post_chat(payload)
+            raw_text = _message_text(data["choices"][0]["message"])
         latency_s = time.monotonic() - started
-        raw_text = _strip_reasoning_artifacts(
-            _message_text(data["choices"][0]["message"])
-        )
-        return data, raw_text, latency_s
+        return data, _strip_reasoning_artifacts(raw_text), latency_s
+
+
+def _responses_output_text(data: dict[str, Any]) -> str:
+    """Collect visible assistant text from a Responses API result."""
+    texts = []
+    output = data.get("output")
+    for item in output if isinstance(output, list) else []:
+        if not isinstance(item, dict) or item.get("type") != "message":
+            continue
+        content = item.get("content")
+        for part in content if isinstance(content, list) else []:
+            if isinstance(part, dict) and part.get("type") == "output_text":
+                texts.append(str(part.get("text", "")))
+    if texts:
+        return "\n".join(texts)
+    return data.get("output_text", "") if isinstance(data.get("output_text"), str) else ""
+
+
+def _responses_data(response) -> tuple[Optional[dict[str, Any]], str]:
+    """Validate a 2xx /responses body before accepting it as an action reply."""
+    try:
+        data = response.json()
+    except ValueError as exc:
+        return None, f"non-JSON body: {exc}"
+    if not isinstance(data, dict):
+        return None, f"unexpected body type: {type(data).__name__}"
+    if data.get("error"):
+        return None, f"error payload: {json.dumps(data['error'], ensure_ascii=False)[:300]}"
+    if data.get("status") != "completed":
+        return None, f"response status is {data.get('status')!r}"
+    if not _responses_output_text(data).strip():
+        return None, "response has no output_text"
+    return data, ""
 
 
 def _chat_completion_data(response) -> tuple[Optional[dict[str, Any]], str]:

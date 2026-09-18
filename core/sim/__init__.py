@@ -5,15 +5,16 @@ Everything in this package talks to a SIMULATOR; nothing in it touches real hard
 ``v0_types``, ...) and the real-robot runners (``real_runner``, ``mvtoken_runner``,
 ``dual_runner``, ``teleop*``, ``franka/``, ``piper/``).
 
-Two simulators are wired, each with the same two-file shape -- a task module (env
-construction + observation/success/TCP/gripper accessors + axis probe) and an MVTOKEN
-rollout runner:
+Two simulator engines are wired. Isaac Lab has both the RoboLab/Franka task
+and a standalone single-arm Piper scene. Task modules construct environments
+and expose observation/success/TCP/gripper accessors and axis probes:
 
 ===========  ==========================  ===============================
 Simulator    task module                 MVTOKEN runner
 ===========  ==========================  ===============================
 ManiSkill    ``maniskill_task``          ``mvtoken_maniskill_runner``
 RoboLab      ``robolab_task``            ``mvtoken_robolab_runner``
+Piper/Isaac  ``piper_isaaclab_task``      ``mvtoken_robolab_runner`` (backend injected)
 ===========  ==========================  ===============================
 
 Plus ``maniskill_scenes`` -- the ManiSkill scene table, one row per environment (see its

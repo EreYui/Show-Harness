@@ -87,7 +87,9 @@ class ProprioceptionPlugin:
         """
         if not self.enabled or not proprio or table_height_m is None:
             return ""
-        eef = proprio.get("eef_pos") or []
+        eef = proprio.get("eef_pos")
+        if eef is None:
+            eef = []
         if len(eef) < 3:
             return ""
         try:
@@ -99,8 +101,9 @@ class ProprioceptionPlugin:
         if holding:
             hint = _fragment("hint_holding")
         else:
+            high_cm = f"{self.high_above_table_m * 100.0:.1f}".rstrip("0").rstrip(".")
             hint = _fragment("hint_descend").replace(
-                "{high_cm}", f"{self.high_above_table_m * 100.0:.0f}"
+                "{high_cm}", high_cm
             )
         block = (
             _fragment("block")
@@ -109,7 +112,30 @@ class ProprioceptionPlugin:
             .replace("{hint}", hint)
         )
         stalled = self._descend_stall_line(proprio)
-        return f"{block}\n{stalled}" if stalled else block
+        goal_error = self._goal_error_line(proprio)
+        return "\n".join(part for part in (block, stalled, goal_error) if part)
+
+    @staticmethod
+    def _goal_error_line(proprio: Mapping[str, Any]) -> str:
+        """Optional coords-plugin measurement for a simulator/calibrated tracker.
+
+        The caller must opt in by supplying ``goal_pos``. Normal real-robot zero-shot
+        sessions do not have that field and remain byte-identical.
+        """
+        eef = proprio.get("eef_pos")
+        goal = proprio.get("goal_pos")
+        if eef is None or goal is None or len(eef) < 3 or len(goal) < 3:
+            return ""
+        try:
+            delta_cm = [(float(goal[i]) - float(eef[i])) * 100.0 for i in range(3)]
+        except (TypeError, ValueError):
+            return ""
+        return (
+            _fragment("goal_error")
+            .replace("{dx_cm}", f"{delta_cm[0]:+.1f}")
+            .replace("{dy_cm}", f"{delta_cm[1]:+.1f}")
+            .replace("{dz_cm}", f"{delta_cm[2]:+.1f}")
+        )
 
     def _descend_stall_line(self, proprio: Mapping[str, Any]) -> str:
         """The "the last descent did not happen" line, or ``""`` when it descended freely.
@@ -154,3 +180,26 @@ class ProprioceptionPlugin:
             .replace("{width_cm}", f"{width_m * 100.0:.1f}")
             .replace("{command_text}", command_text)
         )
+
+    def must_descend_first(
+        self,
+        proprio: Optional[Mapping[str, Any]],
+        table_height_m: Optional[float],
+        *,
+        holding: bool = False,
+    ) -> bool:
+        """Whether the measured-height rule requires one more descent.
+
+        This is the executable counterpart of the prompt's ``MV_DOWN first`` line.
+        It uses only robot proprioception and the calibrated contact height; object
+        coordinates and task-state labels are deliberately not consulted.
+        """
+        if not self.enabled or holding or not proprio or table_height_m is None:
+            return False
+        eef = proprio.get("eef_pos")
+        if eef is None or len(eef) < 3:
+            return False
+        try:
+            return float(eef[2]) - float(table_height_m) > self.high_above_table_m
+        except (TypeError, ValueError):
+            return False

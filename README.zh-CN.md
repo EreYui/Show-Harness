@@ -78,7 +78,7 @@ https://github.com/user-attachments/assets/bd2d31db-f5c5-4554-85bb-2aa206876ac7
 依托一套接口，闭源前沿模型可**零样本**直接控制机器人；小规模开源模型亦只需**不足一个 H200 GPU 小时**的微调，即可成为可用的策略
 
 - 🤖 **一套接口，两种模式** —— 前沿 VLM 零样本驱动，或由微调后的小模型逐步输出单个动作 token
-- 🦾 **不依赖特定本体** —— Franka、AgileX Piper（单臂与双臂）、ManiSkill、Isaac Lab 共用同一套动作词表与提示词
+- 🦾 **不依赖特定本体** —— Franka、AgileX Piper（单臂与双臂）、Isaac Lab 中的 RealMan RM65 双臂、ManiSkill 与 RoboLab 共用同一套动作词表与提示词
 - 🎮 **GUMI 示教采集** —— 在浏览器中操作机器人即完成一次示教，无需遥操作硬件，数据亦无需后处理
 - 🧩 **插件支持严格消融** —— 一个目录、一个开关；关闭后主循环与「不存在该插件」时逐字节一致
 

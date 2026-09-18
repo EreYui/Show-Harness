@@ -19,5 +19,8 @@ Holding an object: lift until clear of the table; descend only to place.
 [descend_stall]
 Last MV_DOWN lowered {moved_cm} of {commanded_cm} cm -> already in contact, do NOT MV_DOWN again
 
+[goal_error]
+Measured current-stage base-axis error (goal - TCP): dx={dx_cm} cm, dy={dy_cm} cm, dz={dz_cm} cm. Reduce the largest stage-compatible error using the ROBOT BASE AXES mapping.
+
 [gripper]
 - Proprioception: gripper width is {width_cm} cm{command_text}.

@@ -42,6 +42,17 @@ def _default_output_contract(extra_tokens: Sequence[str] = ()) -> str:
     )
 
 
+def _cot_output_contract(extra_tokens: Sequence[str] = ()) -> str:
+    """Free-reasoning answer contract used by hosted thinking models."""
+    tokens = tuple(CONTROLLER_TOKENS) + tuple(extra_tokens)
+    return (
+        "Allowed actions:\n"
+        + ", ".join(tokens)
+        + "\nReason from the images and measured state, then end with exactly one line:\n"
+        + "FINAL: <ONE_ACTION>"
+    )
+
+
 def _without_json_output_contract(prompt: str) -> str:
     lines = []
     skip_fields_line = False
@@ -478,7 +489,11 @@ class ControllerAgent:
                 else ()
             )
             allowed_tokens = tuple(CONTROLLER_TOKENS) + rotation_tokens
-            output_contract = _default_output_contract(rotation_tokens)
+            output_contract = (
+                _cot_output_contract(rotation_tokens)
+                if self.cot_mode
+                else _default_output_contract(rotation_tokens)
+            )
 
         prompt = _join_prompt_parts(
             self.common_context,
